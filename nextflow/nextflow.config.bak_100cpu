@@ -1,0 +1,106 @@
+// Disease/BMI run config, adapted from Koslicki_R1/nextflow/nextflow.config.
+//
+// Resource ceiling for the WHOLE run (all accessions together): 100 CPUs, 1000 GB RAM.
+// Two layers enforce it:
+//   1. scripts/run_disease.sh launches Nextflow inside a systemd user scope with
+//      CPUQuota=10000% and MemoryMax=1000000000000 (1000 GB decimal) -- a kernel-enforced hard cap covering Nextflow
+//      itself and every task it spawns;
+//   2. the executor{} pool below never schedules more than 100 declared CPUs / 880 GiB (945 GB) declared
+//      memory at once (leaving headroom under the hard cap for the Nextflow JVM and page cache).
+
+manifest {
+    name        = 'disease-sra'
+    description = 'Sketch, funprofiler and YACHT for SRA accessions with disease/health/BMI metadata.'
+    mainScript  = 'main.nf'
+}
+
+params {
+    todo         = null                                    // shard TSV from scripts/make_todo.py
+    ko_sig       = "/home/grads/lbt5343/Koslicki_R1/KOs_sketched_scaled_1000.sig.zip"
+    yacht_config = "/home/grads/lbt5343/Koslicki_R1/gtdb_r232_ani_thresh_0.95_config.json"
+    outdir       = "/scratch/lbt5343/all-res"               // shared results tree (see its README.md)
+    tracedir     = "${launchDir}/traces"
+    shard        = 'run'
+
+    // identical to Koslicki_R1 so results are interchangeable with what's already in all-res
+    min_compressed_bytes    = 200
+    sourmash_ksize          = 31
+    sourmash_scale          = 1000
+    funprofiler_ksize       = 11
+    funprofiler_scale       = 1000
+    yacht_significance      = 0.99
+    yacht_min_coverage_list = '1 0.5 0.25 0.125 0.0625 0.03125 0.015625 0'
+    yacht_ani_thresh        = 0.95
+
+    // A failing accession is skipped instead of aborting a multi-week run; it stays incomplete in
+    // all-res/index and the next scripts/make_todo.py picks it up again.
+    fetch_exhausted_strategy = 'ignore'
+
+    // Backpressure instead of sharding: at most this many fetched-but-not-yet-analysed sequences
+    // (compressed + decompressed FASTA on disk) at a time. See modules/fetch.nf.
+    inflight_dir = "/scratch/lbt5343/disease-sra/run/inflight"
+    max_inflight = 600
+}
+
+process {
+    executor = 'local'
+    cpus     = 1
+    memory   = '1 GB'
+
+    // sourmash/funcprofiler (Rust rayon) and numpy/BLAS otherwise start one thread per core on the
+    // machine (768 here) regardless of task.cpus; hold every tool to its declared CPUs.
+    beforeScript = { "export RAYON_NUM_THREADS=${task.cpus} OMP_NUM_THREADS=${task.cpus} OPENBLAS_NUM_THREADS=${task.cpus} MKL_NUM_THREADS=${task.cpus} NUMEXPR_NUM_THREADS=${task.cpus} POLARS_MAX_THREADS=${task.cpus}" }
+
+    // One retry for anything (e.g. a task OOM-killed at the hard memory cap), then skip it.
+    errorStrategy = { task.attempt <= 2 ? 'retry' : 'ignore' }
+    maxRetries    = 2
+
+    withName: FETCH_LOGAN {
+        // A fetch waiting on backpressure still holds 1 declared CPU of the 100, so keep this small;
+        // 8 parallel S3 pulls is still well ahead of what sketch/funprofiler can consume.
+        maxForks = 8
+    }
+    // no declared memory for the small stages (peak RSS <0.5 GB in Koslicki_R1), so YACHT's large
+    // memory reservations can never block them from starting
+    withName: 'SOURMASH_SKETCH|DECOMPRESS_FASTA|WRITE_LEDGER_ROW|FETCH_LOGAN' { memory = null }
+    withName: FUNPROFILER { memory = null }
+    withName: YACHT {
+        // Koslicki_R1 measured YACHT at ~1.5 cores used on median with 6 reserved, and a sharply
+        // sublinear thread speedup (1/2/4/8 threads -> 303/191/136/110 s).
+        // Memory comes from the sketch-size tiers in modules/yacht.nf.
+        // 2026-10-01: was cpus=4 with no fork cap -- 24 YACHT x 4 + 8 fetch filled all 100 declared
+        // CPUs while YACHT really used ~1.3 cores each, so sketch/funprofiler couldn't get a slot,
+        // FASTAs piled up, fetch backpressure stalled, and real CPU use fell to ~31. Now 2 threads
+        // and at most 35 at once (70 declared CPUs), leaving 30 for fetch/sketch/funprofiler.
+        cpus     = 2
+        maxForks = 35
+    }
+    withName: CLEANUP_FASTA {
+        cpus   = 1
+        memory = '256 MB'
+    }
+}
+
+executor {
+    name   = 'local'
+    cpus   = 100
+    // Nextflow units are binary: 880 GiB = 945 GB decimal, + 12 GiB JVM heap stays under 1000 GB
+    memory = '880 GB'
+}
+
+// Work dirs are removed at the end of the run (results are already published to all-res).
+cleanup = true
+
+trace {
+    enabled   = true
+    file      = "${params.tracedir}/trace_${params.shard}.tsv"
+    overwrite = true
+    fields    = 'task_id,process,tag,status,exit,attempt,cpus,memory,%cpu,submit,start,complete,realtime,peak_rss,read_bytes,write_bytes'
+    raw       = true
+}
+
+report {
+    enabled   = true
+    file      = "${params.tracedir}/report_${params.shard}.html"
+    overwrite = true
+}
