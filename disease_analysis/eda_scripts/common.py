@@ -86,3 +86,18 @@ def load_hashes(path):
 def load_nohuman(accs, procs):
     with Pool(procs) as p:
         return p.map(load_hashes, [nohuman_path(a) for a in accs], chunksize=64)
+
+
+GTDB_TAXONOMY = [f"{RESULTS}/gtdb_r232/{d}_taxonomy_r232.tsv.gz" for d in ["bac120", "ar53"]]
+RANK_PREFIX = {"d__": "domain", "p__": "phylum", "c__": "class", "o__": "order", "f__": "family", "g__": "genus",
+               "s__": "species"}
+
+
+def read_gtdb():
+    """GTDB lineage per YACHT taxon (genome accession without the RS_/GB_ prefix): taxon, then one
+    column per rank holding the prefixed name (e.g. genus = 'g__Fusobacterium')."""
+    tax = pd.concat(pd.read_csv(p, sep="\t", header=None, names=["taxon", "lineage"]) for p in GTDB_TAXONOMY)
+    tax["taxon"] = tax.taxon.str[3:]
+    ranks = tax.pop("lineage").str.split(";", expand=True)
+    ranks.columns = list(RANK_PREFIX.values())
+    return pd.concat([tax, ranks], axis=1)
