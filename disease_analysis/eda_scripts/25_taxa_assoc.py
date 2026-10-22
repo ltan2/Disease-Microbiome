@@ -49,7 +49,8 @@ def assoc(obs):
     obs["y"] = np.log2(obs.a + pc)
     obs["y2"] = obs.y ** 2
     s = obs.groupby(["label", "group"]).agg(n_det=("y", "size"), s1=("y", "sum"), s2=("y2", "sum"), sa=("a", "sum"))
-    s = s.unstack("group", fill_value=0).reindex(columns=common.GROUPS, level=1, fill_value=0)
+    s = s.unstack("group", fill_value=0)  # a group with no detection gets zero columns, not a missing level
+    s = s.reindex(columns=pd.MultiIndex.from_product([s.columns.levels[0], common.GROUPS]), fill_value=0)
     g = {}
     for grp in common.GROUPS:
         N, z = n[grp], n[grp] - s[("n_det", grp)]

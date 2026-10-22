@@ -24,9 +24,29 @@ COVERAGES = ["1.0", "0.5", "0.25", "0.125", "0.0625", "0.03125", "0.015625"]
 LEVEL = {"taxa": "coverage", "func": None}
 
 
-def out_dir(disease, kind):
-    """results/<disease>/<kind>; disease spaces -> '_' and apostrophes dropped (same rule as the Makefile)."""
-    d = f"{RESULTS}/{disease.replace(' ', '_').replace(chr(39), '')}/{kind}"
+# body site from the SRA organism (sra_metadata.organism); human metagenome / metagenome do not say
+SITE_ORGANISMS = {
+    "gut": ["human gut metagenome", "gut metagenome", "feces metagenome", "human feces metagenome"],
+    "oral": ["human oral metagenome", "human saliva metagenome", "oral metagenome"],
+}
+UNKNOWN_ORGANISMS = ["human metagenome", "metagenome"]
+
+
+def body_site(organism):
+    """gut / oral / unknown (no organism, or one that names no site) / other (any other site or host)."""
+    for site, organisms in SITE_ORGANISMS.items():
+        if organism in organisms:
+            return site
+    return "unknown" if pd.isna(organism) or organism in UNKNOWN_ORGANISMS else "other"
+
+
+def out_dir(disease, kind, site=None):
+    """results/<disease>/<kind>; disease spaces -> '_' and apostrophes dropped (same rule as the Makefile).
+
+    With a body site (site=, else the SITE environment variable) results/<disease>/site_<site>/<kind>,
+    where 29_site_filter.py writes that site's samples; site="" forces the unfiltered directory."""
+    site = os.environ.get("SITE", "") if site is None else site
+    d = f"{RESULTS}/{disease.replace(' ', '_').replace(chr(39), '')}" + (f"/site_{site}" if site else "") + f"/{kind}"
     os.makedirs(d, exist_ok=True)
     return d
 
