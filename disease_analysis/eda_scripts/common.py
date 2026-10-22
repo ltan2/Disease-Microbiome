@@ -24,9 +24,29 @@ COVERAGES = ["1.0", "0.5", "0.25", "0.125", "0.0625", "0.03125", "0.015625"]
 LEVEL = {"taxa": "coverage", "func": None}
 
 
-def out_dir(disease, kind):
-    """results/<disease>/<kind>; disease spaces -> '_' and apostrophes dropped (same rule as the Makefile)."""
-    d = f"{RESULTS}/{disease.replace(' ', '_').replace(chr(39), '')}/{kind}"
+# body site from the SRA organism (sra_metadata.organism); human metagenome / metagenome do not say
+SITE_ORGANISMS = {
+    "gut": ["human gut metagenome", "gut metagenome", "feces metagenome", "human feces metagenome"],
+    "oral": ["human oral metagenome", "human saliva metagenome", "oral metagenome"],
+}
+UNKNOWN_ORGANISMS = ["human metagenome", "metagenome"]
+
+
+def body_site(organism):
+    """gut / oral / unknown (no organism, or one that names no site) / other (any other site or host)."""
+    for site, organisms in SITE_ORGANISMS.items():
+        if organism in organisms:
+            return site
+    return "unknown" if pd.isna(organism) or organism in UNKNOWN_ORGANISMS else "other"
+
+
+def out_dir(disease, kind, site=None):
+    """results/<disease>/<kind>; disease spaces -> '_' and apostrophes dropped (same rule as the Makefile).
+
+    With a body site (site=, else the SITE environment variable) results/<disease>/site_<site>/<kind>,
+    where 29_site_filter.py writes that site's samples; site="" forces the unfiltered directory."""
+    site = os.environ.get("SITE", "") if site is None else site
+    d = f"{RESULTS}/{disease.replace(' ', '_').replace(chr(39), '')}" + (f"/site_{site}" if site else "") + f"/{kind}"
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -86,3 +106,18 @@ def load_hashes(path):
 def load_nohuman(accs, procs):
     with Pool(procs) as p:
         return p.map(load_hashes, [nohuman_path(a) for a in accs], chunksize=64)
+
+
+GTDB_TAXONOMY = [f"{RESULTS}/gtdb_r232/{d}_taxonomy_r232.tsv.gz" for d in ["bac120", "ar53"]]
+RANK_PREFIX = {"d__": "domain", "p__": "phylum", "c__": "class", "o__": "order", "f__": "family", "g__": "genus",
+               "s__": "species"}
+
+
+def read_gtdb():
+    """GTDB lineage per YACHT taxon (genome accession without the RS_/GB_ prefix): taxon, then one
+    column per rank holding the prefixed name (e.g. genus = 'g__Fusobacterium')."""
+    tax = pd.concat(pd.read_csv(p, sep="\t", header=None, names=["taxon", "lineage"]) for p in GTDB_TAXONOMY)
+    tax["taxon"] = tax.taxon.str[3:]
+    ranks = tax.pop("lineage").str.split(";", expand=True)
+    ranks.columns = list(RANK_PREFIX.values())
+    return pd.concat([tax, ranks], axis=1)
