@@ -4,10 +4,13 @@
   within studies  per-BioProject Mann-Whitney + van Elteren (from within_project.tsv)
 Writes results/count_tests_all.tex and results/count_tests_within.tex (longtable fragments sized for a
 single-column portrait page; need the booktabs and longtable packages and must not be put inside a table float) and results/count_tests.tex, a standalone document with both.
-Usage: 22_latex_tables.py DISEASE [DISEASE ...]
+With --depth nonhuman|raw, only the all-samples table is written, on counts per Mbase of sequencing depth
+(from <kind>/kruskal_dunn_per_mbp<suffix>.tsv, made by make count-tests-per-mbp), to
+results/count_tests_all_per_mbp<suffix>.tex and the standalone results/count_tests_per_mbp<suffix>.tex.
+Usage: 22_latex_tables.py [--depth nonhuman|raw] DISEASE [DISEASE ...]
 """
+import argparse
 import os
-import sys
 
 import pandas as pd
 
@@ -17,6 +20,10 @@ import common
 KINDS = {"sketch": ("Sketch (unique hashes)", "hash_counts.tsv", "n_unique_hashes"),
          "func": ("KO (distinct KOs)", "distinct_per_sample.tsv", "n_distinct"),
          "taxa": ("Taxa (distinct taxa)", "distinct_per_sample.tsv", "n_distinct")}
+# per-Mbase versions: (data label, count file, count column), file and test suffix appended
+KINDS_PER_MBP = {"sketch": ("Sketch (unique hashes / Mbase)", "hash_counts_per_mbp", "n_unique_hashes_per_mbp"),
+                 "func": ("KO (distinct KOs / Mbase)", "distinct_per_mbp", "n_distinct_per_mbp"),
+                 "taxa": ("Taxa (distinct taxa / Mbase)", "distinct_per_mbp", "n_distinct_per_mbp")}
 LABEL = {"disease": "D", "control": "C", "other_control": "O"}
 
 
@@ -33,7 +40,12 @@ def num(x, digits=2):
 
 
 def med(x):
-    return "--" if pd.isna(x) else f"{x:,.0f}" if float(x).is_integer() else f"{x:,.1f}"
+    """Whole counts as integers; per-Mbase rates to 3 significant figures."""
+    if pd.isna(x):
+        return "--"
+    if float(x).is_integer() or abs(x) >= 1000:
+        return f"{x:,.0f}"
+    return f"{x:.3g}"
 
 
 def pval(p):
@@ -43,6 +55,8 @@ def pval(p):
         return f"{p:.3f}"
     if p >= 0.001:
         return f"{p:.4f}"
+    if p == 0:  # below double precision
+        return r"$<10^{-300}$"
     m, e = f"{p:.1e}".split("e")
     return rf"${m}\times10^{{{int(e)}}}$"
 
@@ -68,15 +82,22 @@ def block_name(data, level):
     return f"{data}, coverage {level}" if level else data
 
 
-def all_samples(diseases):
+def all_samples(diseases, suffix=None):
+    """suffix None: raw counts; otherwise per-Mbase counts, suffix "" (raw depth) or "_nonhuman"."""
     rows = []
     for disease in diseases:
         rows.append(section(disease, 7))
-        for kind, (data, file, col) in KINDS.items():
+        if suffix is None:
+            kinds = {k: (data, file, col, "kruskal_dunn.tsv") for k, (data, file, col) in KINDS.items()}
+        else:
+            kinds = {k: (data, f"{file}{suffix}.tsv", col, f"kruskal_dunn_per_mbp{suffix}.tsv")
+                     for k, (data, file, col) in KINDS_PER_MBP.items()}
+        for kind, (data, file, col, test_file) in kinds.items():
             out = common.out_dir(disease, kind)
-            if not os.path.exists(f"{out}/kruskal_dunn.tsv"):
+            if not os.path.exists(f"{out}/{test_file}"):
+                print(f"skipping {disease} {kind}: no {out}/{test_file}")
                 continue
-            res = pd.read_csv(f"{out}/kruskal_dunn.tsv", sep="\t", dtype={"coverage": str})
+            res = pd.read_csv(f"{out}/{test_file}", sep="\t", dtype={"coverage": str})
             counts = pd.read_csv(f"{out}/{file}", sep="\t", dtype={"coverage": str})
             facet = "coverage" if "coverage" in res else None
             for level, r in res.groupby(facet, sort=False) if facet else [("", res)]:
@@ -89,7 +110,7 @@ def all_samples(diseases):
                     rows.append(" & ".join([
                         "KW" if kw else "Dunn", ", ".join(LABEL[g] for g in groups) if kw else
                         f"{LABEL[groups[0]]}--{LABEL[groups[1]]}",
-                        "/".join(f"{n[g]}" for g in groups), "/".join(f"{m[g]:.0f}" for g in groups),
+                        "/".join(f"{n[g]}" for g in groups), "/".join(med(m[g]) for g in groups),
                         num(t.statistic), pval(t["p-value"]), pval(t["p-adj (Holm)"])]) + r" \\")
                 rows.append(r"\addlinespace")
     header = r"Test & Groups & $n$ & Median & $H$ or $z$ & $p$ & $p_{\mathrm{Holm}}$"
@@ -99,7 +120,14 @@ def all_samples(diseases):
                r"Dunn = pairwise Dunn test ($z$, tie-corrected; $p_{\mathrm{Holm}}$ adjusted over the three "
                r"pairs), $z>0$ meaning the first group ranks higher. $n$ and medians are given in the order "
                r"of the groups.")
-    return longtable("@{}llrrrrr@{}", header, rows, caption, "tab:count-tests-all")
+    label = "tab:count-tests-all"
+    if suffix is not None:
+        depth = ("human-free sequencing depth (SRA Mbases $\\times$ the sample's human-free share of sketch hashes)"
+                 if suffix else "sequencing depth (SRA Mbases, before human removal)")
+        caption = (caption.replace("Per-sample counts compared", "Per-sample counts per Mbase compared")
+                   + f" Each count is divided by the sample's {depth}; samples without depth are left out.")
+        label = f"tab:count-tests-all-per-mbp{suffix.replace('_', '-')}"
+    return longtable("@{}llrrrrr@{}", header, rows, caption, label)
 
 
 def within(diseases):
@@ -129,7 +157,20 @@ def within(diseases):
     return longtable("@{}lrrrrrrrr@{}", header, rows, caption, "tab:count-tests-within")
 
 
-diseases = sys.argv[1:]
+ap = argparse.ArgumentParser()
+ap.add_argument("--depth", choices=["nonhuman", "raw"])
+ap.add_argument("diseases", nargs="+")
+args = ap.parse_args()
+diseases = args.diseases
+if args.depth:
+    suffix = "_nonhuman" if args.depth == "nonhuman" else ""
+    name = f"count_tests_all_per_mbp{suffix}"
+    open(f"{common.RESULTS}/{name}.tex", "w").write(all_samples(diseases, suffix))
+    open(f"{common.RESULTS}/count_tests_per_mbp{suffix}.tex", "w").write("\n".join([
+        r"\documentclass[10pt]{article}", r"\usepackage{booktabs,longtable}", r"\begin{document}",
+        rf"\input{{{name}}}", r"\end{document}", ""]))
+    print(f"wrote {common.RESULTS}/{{{name},count_tests_per_mbp{suffix}}}.tex")
+    raise SystemExit
 open(f"{common.RESULTS}/count_tests_all.tex", "w").write(all_samples(diseases))
 open(f"{common.RESULTS}/count_tests_within.tex", "w").write(within(diseases))
 open(f"{common.RESULTS}/count_tests.tex", "w").write("\n".join([
